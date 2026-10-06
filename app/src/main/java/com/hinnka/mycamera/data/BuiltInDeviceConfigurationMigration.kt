@@ -59,7 +59,11 @@ internal class BuiltInDeviceConfigurationMigration(
     }
 
     companion object {
-        const val APPLIED_DEVICE_KEY_NAME = "builtin_device_configuration_applied_v1"
+        // OnePlus 12 tuning: bumped from v1 so an in-place app update re-applies the built-in
+        // configuration. The pre-existing value written by an earlier build is the same device
+        // identity ("oneplus/pjd110"), which would otherwise suppress re-application and leave
+        // overrides that an older build had already rewritten (e.g. the noise profile).
+        const val APPLIED_DEVICE_KEY_NAME = "builtin_device_configuration_applied_v2"
         val APPLIED_DEVICE = stringPreferencesKey(APPLIED_DEVICE_KEY_NAME)
         private const val ASSET_DIRECTORY = "device_configurations"
 

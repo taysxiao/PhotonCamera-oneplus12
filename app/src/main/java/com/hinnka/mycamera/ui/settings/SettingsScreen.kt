@@ -425,9 +425,14 @@ fun SettingsScreen(
     val rawOutputUpscaleMode by viewModel.rawOutputUpscaleMode.collectAsState()
     val rawDigitalZoomResamplingEnabled by viewModel.rawDigitalZoomResamplingEnabled.collectAsState()
     val availableDcps = viewModel.availableDcps
-    val availableRawNoiseProfiles = viewModel.availableRawNoiseProfiles.filterNot {
-        it.id == RawNoiseProfileManager.ADAPTIVE_PROFILE_ID
-    }
+    // OnePlus 12 tuning: keep the adaptive profile selectable.
+    // Upstream hid it here, and the normalisation LaunchedEffect below then silently rewrote any
+    // persisted adaptive selection back to DEFAULT_PROFILE_ID (Pixel 5) the moment the settings
+    // screen was opened -- which defeated raw_noise_profile_id=adaptive_x9_ultra in the built-in
+    // device configuration. RawNoiseProfileManager.resolveSelection() resolves the id at capture
+    // time from the sensor geometry in each RAW's metadata (falling back to the X9 Ultra template
+    // when that geometry is incomplete), so exposing it here is safe.
+    val availableRawNoiseProfiles = viewModel.availableRawNoiseProfiles
     val availableLuts = viewModel.availableLutList
     val availableFrames = viewModel.availableFrameList
     val previewThumbnail = viewModel.previewThumbnail
