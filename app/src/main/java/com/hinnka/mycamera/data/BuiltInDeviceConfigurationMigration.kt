@@ -94,8 +94,12 @@ internal class BuiltInDeviceConfigurationMigration(
                             .filter { it.isBuiltIn }.map { it.id }.toSet()
                     }
                     requireProfiles("raw_noise_profile_id", "raw_noise_profile_ids_by_lens") {
+                        // OnePlus 12 tuning: allow the adaptive X9 Ultra profile here. It has no static
+                        // asset file, but RawNoiseProfileManager.resolveSelection() resolves it at runtime
+                        // from the sensor geometry in each RAW's metadata, with a graceful fallback when
+                        // that geometry is incomplete.
                         RawNoiseProfileManager(appContext).getAvailableProfiles()
-                            .filter { it.isBuiltIn && it.id != RawNoiseProfileManager.ADAPTIVE_PROFILE_ID }
+                            .filter { it.isBuiltIn }
                             .map { it.id }.toSet()
                     }
                 },
