@@ -1,0 +1,17 @@
+{
+  "format": "photon_device_configuration",
+  "version": 1,
+  "name": "OnePlus 12",
+  "manufacturer": "OnePlus",
+  "models": ["PJD110", "CPH2573", "CPH2581", "CPH2583"],
+  "overrides": {
+    "enable_logical_multi_camera_discovery": true,
+    "hdr_plus_frame_count": 8,
+    "nr_level": 0,
+    "edge_level": 0,
+    "raw_lens_shading_correction_enabled": true,
+    "use_p010": true,
+    "use_p3_color_space": true,
+    "raw_noise_profile_id": "adaptive_x9_ultra"
+  }
+}
