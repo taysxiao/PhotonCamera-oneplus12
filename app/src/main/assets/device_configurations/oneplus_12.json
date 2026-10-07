@@ -12,6 +12,7 @@
     "raw_lens_shading_correction_enabled": true,
     "use_p010": true,
     "use_p3_color_space": true,
-    "raw_noise_profile_id": "adaptive_x9_ultra"
+    "raw_noise_profile_id": "adaptive_x9_ultra",
+    "raw_dcp_id": "builtin_dcp_OPPO Find X8 Ultra back camera 8.67mm f1.8 Adobe Standard"
   }
 }

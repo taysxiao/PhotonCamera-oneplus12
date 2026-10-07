@@ -1693,6 +1693,10 @@ fun CameraScreen(
                 viewModel.realtimeStabilizationCoordinator.isCurrentCameraSupported,
             onPhotoPreviewStabilizationChange =
                 viewModel::setPhotoPreviewStabilizationEnabled,
+            // 订阅标定版本号：相机在首帧后才完成标定、或中途切换镜头时，
+            // 促使重组重新求值 isCurrentCameraSupported，避免开关停留在初始 false。
+            photoPreviewStabilizationCalibrationVersion =
+                viewModel.realtimeStabilizationCoordinator.calibrationRevision,
             onRawDcpChange = { viewModel.setRawDcpId(it) },
             onRawDcpIdsByLensChange = { viewModel.setRawDcpIdsByLens(it) },
             onRawHncsFilmCurveModeChange = { viewModel.setRawHncsFilmCurveMode(it) },

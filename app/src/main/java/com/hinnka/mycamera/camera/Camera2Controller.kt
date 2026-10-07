@@ -127,6 +127,13 @@ class Camera2Controller(private val context: Context) {
         private const val NO_IMAGE_READER_FORMAT = -1
         private const val AWB_TEMPERATURE_MIN = 2000
         private const val AWB_TEMPERATURE_MAX = 8000
+
+        /**
+         * COLOR_CORRECTION_GAINS 的整体可表示范围。
+         * 保留一段大于 1 的余量，让暖调侧的红通道有向下收缩的空间。
+         */
+        private const val MIN_GAIN_SCALE = 0.25f
+        private const val MAX_GAIN_SCALE = 4f
         private val FORCED_VENDOR_SESSION_PARAMETER_KEYS = setOf(
             VendorCaptureKey.VIVO_FORCE_SENSOR_MODE
         )
@@ -5964,13 +5971,55 @@ class Camera2Controller(private val context: Context) {
         val redGain = 1f / illuminant.red.coerceAtLeast(1e-3f)
         val greenGain = 1f / illuminant.green.coerceAtLeast(1e-3f)
         val blueGain = 1f / illuminant.blue.coerceAtLeast(1e-3f)
-        val minGain = minOf(redGain, greenGain, blueGain).coerceAtLeast(1e-3f)
+
+        // 以绿色为归一化基准，而不是取三通道最小值。
+        // 取 min 会让增益最大的通道恒为 1.0：在 2500K~6500K 区间红色通道始终是最大值，
+        // 于是 min 永远落在红通道上，红增益被钉死为 1.0，手动色温滑杆在暖调侧完全失效
+        // （只改到蓝通道），表现为"怎么调都偏蓝"。
+        // 改用 green=1 后三通道比值被完整保留，R 随色温单调变化。
+        return normalizeRggbGains(
+            red = redGain,
+            greenEven = greenGain,
+            greenOdd = greenGain,
+            blue = blueGain
+        )
+    }
+
+    /**
+     * 将四通道白平衡增益按绿色通道归一化，并整体缩放到 [1/MIN_GAIN_SCALE, MAX_GAIN_SCALE] 区间。
+     *
+     * Camera2 的 COLOR_CORRECTION_GAINS 只关心通道之间的相对比例，绝对值由 HAL 自行处理，
+     * 因此这里保留比例关系即可，不要对单个通道做 coerceAtLeast(1f) —— 那会破坏比例。
+     */
+    private fun normalizeRggbGains(
+        red: Float,
+        greenEven: Float,
+        greenOdd: Float,
+        blue: Float
+    ): RggbChannelVector {
+        val safeGreen = ((greenEven + greenOdd) / 2f).takeIf { it.isFinite() && it > 1e-3f } ?: 1f
+        val scaledRed = (red / safeGreen).takeIf { it.isFinite() } ?: 1f
+        val scaledGreenEven = (greenEven / safeGreen).takeIf { it.isFinite() } ?: 1f
+        val scaledGreenOdd = (greenOdd / safeGreen).takeIf { it.isFinite() } ?: 1f
+        val scaledBlue = (blue / safeGreen).takeIf { it.isFinite() } ?: 1f
+
+        val minGain = minOf(scaledRed, scaledGreenEven, scaledGreenOdd, scaledBlue)
+            .takeIf { it.isFinite() && it > 1e-3f } ?: 1f
+        val maxGain = maxOf(scaledRed, scaledGreenEven, scaledGreenOdd, scaledBlue)
+            .takeIf { it.isFinite() && it > 1e-3f } ?: 1f
+
+        // 仅在整体超出可表示范围时做一次统一缩放，保持通道比例不变。
+        val overallScale = when {
+            minGain < MIN_GAIN_SCALE -> MIN_GAIN_SCALE / minGain
+            maxGain > MAX_GAIN_SCALE -> MAX_GAIN_SCALE / maxGain
+            else -> 1f
+        }.coerceAtLeast(1e-3f)
 
         return RggbChannelVector(
-            (redGain / minGain).coerceIn(1f, 4f),
-            (greenGain / minGain).coerceIn(1f, 4f),
-            (greenGain / minGain).coerceIn(1f, 4f),
-            (blueGain / minGain).coerceIn(1f, 4f)
+            (scaledRed * overallScale).coerceIn(MIN_GAIN_SCALE, MAX_GAIN_SCALE),
+            (scaledGreenEven * overallScale).coerceIn(MIN_GAIN_SCALE, MAX_GAIN_SCALE),
+            (scaledGreenOdd * overallScale).coerceIn(MIN_GAIN_SCALE, MAX_GAIN_SCALE),
+            (scaledBlue * overallScale).coerceIn(MIN_GAIN_SCALE, MAX_GAIN_SCALE)
         )
     }
 
@@ -5979,17 +6028,17 @@ class Camera2Controller(private val context: Context) {
         anchor: ManualWhiteBalanceAnchor,
         frozenGains: RggbChannelVector
     ): RggbChannelVector {
-        if (abs(targetKelvin - anchor.baseTemperature) <= 25) {
+        if (abs(targetKelvin - anchor.baseTemperature) <= 2) {
             return frozenGains
         }
 
         val baseGains = kelvinToRggbGains(anchor.baseTemperature)
         val targetGains = kelvinToRggbGains(targetKelvin)
-        return RggbChannelVector(
-            scaleFrozenWhiteBalanceGain(frozenGains.red, targetGains.red, baseGains.red),
-            scaleFrozenWhiteBalanceGain(frozenGains.greenEven, targetGains.greenEven, baseGains.greenEven),
-            scaleFrozenWhiteBalanceGain(frozenGains.greenOdd, targetGains.greenOdd, baseGains.greenOdd),
-            scaleFrozenWhiteBalanceGain(frozenGains.blue, targetGains.blue, baseGains.blue)
+        return normalizeRggbGains(
+            red = scaleFrozenWhiteBalanceGain(frozenGains.red, targetGains.red, baseGains.red),
+            greenEven = scaleFrozenWhiteBalanceGain(frozenGains.greenEven, targetGains.greenEven, baseGains.greenEven),
+            greenOdd = scaleFrozenWhiteBalanceGain(frozenGains.greenOdd, targetGains.greenOdd, baseGains.greenOdd),
+            blue = scaleFrozenWhiteBalanceGain(frozenGains.blue, targetGains.blue, baseGains.blue)
         )
     }
 
@@ -5998,7 +6047,9 @@ class Camera2Controller(private val context: Context) {
         targetGain: Float,
         baseGain: Float
     ): Float {
-        return (frozenGain * targetGain / baseGain.coerceAtLeast(1e-3f)).coerceAtLeast(1f)
+        // 不要在这里对单通道 coerceAtLeast(1f)：各通道的缩放比例不同，
+        // 逐通道截断会直接破坏红/蓝比例，导致手动色温偏蓝。截断统一交给 normalizeRggbGains。
+        return frozenGain * targetGain / baseGain.coerceAtLeast(1e-3f)
     }
 
     private fun estimateKelvinFromRggbGains(gains: RggbChannelVector): Int {

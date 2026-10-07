@@ -91,6 +91,8 @@ fun CameraTopSheet(
     photoPreviewStabilizationEnabled: Boolean,
     photoPreviewStabilizationAvailable: Boolean,
     onPhotoPreviewStabilizationChange: (Boolean) -> Unit,
+    // 仅用于订阅标定变化、触发重组；不参与渲染逻辑。
+    photoPreviewStabilizationCalibrationVersion: Long = 0L,
     onRawDcpChange: (String?) -> Unit,
     onRawDcpIdsByLensChange: ((Map<String, String?>) -> Unit)? = null,
     onRawHncsFilmCurveModeChange: (HncsFilmCurveMode) -> Unit,

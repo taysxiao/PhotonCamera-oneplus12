@@ -20,6 +20,7 @@ import com.hinnka.mycamera.utils.PLog
 import java.util.ArrayDeque
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 const val STABILIZATION_ROW_COUNT = MgcEisNativeEngine.STRIP_COUNT
 const val STABILIZATION_LOOKAHEAD_FRAME_COUNT = MgcEisNativeEngine.LOOKAHEAD_FRAME_COUNT
@@ -93,6 +94,7 @@ private data class CameraCalibration(
     val timestampSource: Int,
     val supportsOisSamples: Boolean,
     val supportsLensIntrinsicsSamples: Boolean,
+    val reportsOpticalCorrectionTelemetry: Boolean = supportsOisSamples || supportsLensIntrinsicsSamples,
 )
 
 private data class FrameMetadata(
@@ -222,6 +224,26 @@ class RealtimeStabilizationCoordinator(context: Context) {
 
     @Volatile
     private var calibration: CameraCalibration? = null
+
+    /**
+     * calibration 的可观察版本号。
+     *
+     * `calibration` 是普通 @Volatile 字段，Compose 读取 [isCurrentCameraSupported] 时
+     * 不会因此重组。若相机在首帧之后才完成标定（或用户中途切换镜头），
+     * 开关会一直停留在初始的 false，看起来像"设备不支持"。
+     * 每次 calibration 变化时自增，供 UI 订阅并触发重组。
+     */
+    private val calibrationVersion = AtomicLong(0L)
+
+    /** 供 UI 订阅；读取它即可在标定变化时触发重组。 */
+    val calibrationRevision: Long get() = calibrationVersion.get()
+
+    private fun updateCalibration(value: CameraCalibration?) {
+        calibration = value
+        // calibration 可能在开屏与切镜头时从不同线程更新，用原子自增保证版本号不重复，
+        // 否则 UI 可能收不到变化通知。
+        calibrationVersion.incrementAndGet()
+    }
 
     @Volatile
     private var externalLensStabilizationConfig = ExternalLensStabilizationConfig.Disabled
@@ -364,7 +386,7 @@ class RealtimeStabilizationCoordinator(context: Context) {
         val activeArray = characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
         val physicalSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
         if (activeArray == null || physicalSize == null) {
-            calibration = null
+            updateCalibration(null)
             return
         }
         val nominalLensIntrinsics = characteristics.get(
@@ -391,7 +413,13 @@ class RealtimeStabilizationCoordinator(context: Context) {
         val supportsLensIntrinsicsSamples = Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM &&
             nominalLensIntrinsics != null &&
             resultKeyNames.contains(CaptureResult.STATISTICS_LENS_INTRINSICS_SAMPLES.name)
-        calibration = CameraCalibration(
+        // 部分 HAL（含 QTI CAMX 在 PixelOS 上）会声明 LENS_OPTICAL_STABILIZATION_MODE_ON，
+        // 却既不上报 STATISTICS_INFO_AVAILABLE_OIS_DATA_MODES，也不上报 OIS/lens intrinsics 采样。
+        // 这类 HAL 无法提供任何"光学校正是否被接受"的证据，若据此判定冲突，
+        // 预览防抖会在若干帧后被永久锁死，而 HAL 侧其实并未与 EIS 争用。
+        // 因此只有在 HAL 确实声明了采样通道时，缺少采样才被视为冲突。
+        val reportsOpticalCorrectionTelemetry = supportsOisSamples || supportsLensIntrinsicsSamples
+        val newCalibration = CameraCalibration(
             cameraId = cameraId,
             activeArray = Rect(activeArray),
             preCorrectionActiveArray = Rect(
@@ -412,7 +440,9 @@ class RealtimeStabilizationCoordinator(context: Context) {
             ) ?: CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN,
             supportsOisSamples = supportsOisSamples,
             supportsLensIntrinsicsSamples = supportsLensIntrinsicsSamples,
+            reportsOpticalCorrectionTelemetry = reportsOpticalCorrectionTelemetry,
         )
+        updateCalibration(newCalibration)
         PLog.i(
             TAG,
             "MGC camera calibration: camera=$cameraId, active=$activeArray, physical=$physicalSize, " +
@@ -795,7 +825,11 @@ class RealtimeStabilizationCoordinator(context: Context) {
         } else {
             requestedOpticalMode == CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON
         }
+        // HAL 完全没有上报光学校正采样通道时，"没有采样"不能作为"冲突"的证据：
+        // 那只是 HAL 未实现遥测，而不是 OIS 与 EIS 真的打架。
+        // 只有 HAL 声明过采样能力、却持续不产出采样时，才判定为冲突。
         val opticalConflict = opticalStabilizationActive &&
+            calibration?.reportsOpticalCorrectionTelemetry == true &&
             !opticalCorrectionAccepted
         if (!videoConflict && !opticalConflict) {
             consecutiveHalStabilizationConflictCount = 0
