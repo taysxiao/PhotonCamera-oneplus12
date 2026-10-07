@@ -95,11 +95,31 @@ internal enum class MgcSpatialGpuDenoiseMode {
  * 7. 结构增强 (Structure/Clarity - L通道高通滤波)
  * 8. 最终锐化 (Unsharp Mask)
  */
+/**
+ * "相机 → PCS"色彩校正矩阵元素的允许上限。
+ *
+ * 正常标定矩阵的元素都在个位数以内；一旦某个元素超过它，说明矩阵是在接近
+ * 奇异的状态下求逆得到的，直接使用会让整幅画面出现严重色偏。
+ */
+private const val MAX_PLAUSIBLE_CAMERA_TO_PCS_ELEMENT = 6f
+
 class RawDemosaicProcessor {
 
     /**
      * DNG 数据容器（包含原始 DngRawData 用于清理）
      */
+
+    /**
+     * 判断 DNG/HAL 提供的色彩校正矩阵是否可用。
+     *
+     * 正常标定矩阵的元素都在个位数以内；元素过大说明它是在接近奇异的状态下
+     * 求逆得到的，直接使用会带来严重色偏。
+     */
+    private fun isPlausibleCameraToPcsMatrix(matrix: FloatArray): Boolean {
+        if (matrix.size != 9) return false
+        if (matrix.any { !it.isFinite() }) return false
+        return matrix.all { abs(it) <= MAX_PLAUSIBLE_CAMERA_TO_PCS_ELEMENT }
+    }
 
     /**
      * 将 DngRawData 转换为 RawMetadata
@@ -123,11 +143,18 @@ class RawDemosaicProcessor {
         val whiteBalanceGains = dngRawData.whiteBalance
 
         // 色彩校正矩阵：DNG 提供的是 3x3 矩阵（行主序）
-        val colorCorrectionMatrix = if (dngRawData.colorMatrix.size == 9) {
-            dngRawData.colorMatrix
-        } else {
-            // 默认单位矩阵
-            floatArrayOf(
+        //
+        // 部分 HAL 在手动白平衡下会导出病态矩阵：白平衡增益把白点推到极端位置，
+        // 色适应矩阵接近奇异，求逆后某个通道被放大十几倍——一加 12 上实测蓝通道
+        // 达到 15.04，成片整张偏蓝。正常矩阵的元素都在个位数以内，据此拒收异常
+        // 值，退回上层 metadata 的矩阵（它由 DngSdkColorSpec 计算并自检），
+        // 最后才退到单位矩阵。
+        val rawColorCorrectionMatrix = dngRawData.colorMatrix
+        val colorCorrectionMatrix = when {
+            isPlausibleCameraToPcsMatrix(rawColorCorrectionMatrix) -> rawColorCorrectionMatrix
+            baseMetadata != null && isPlausibleCameraToPcsMatrix(baseMetadata.colorCorrectionMatrix) ->
+                baseMetadata.colorCorrectionMatrix
+            else -> floatArrayOf(
                 1.0f, 0.0f, 0.0f,
                 0.0f, 1.0f, 0.0f,
                 0.0f, 0.0f, 1.0f

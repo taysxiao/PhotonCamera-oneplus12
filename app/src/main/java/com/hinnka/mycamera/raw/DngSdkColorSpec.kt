@@ -12,12 +12,12 @@ internal object DngSdkColorSpec {
     private const val D50_Y = 0.3585f
 
     /**
-     * `cameraToPcs · cameraWhite` 的色度允许偏离 D50 的最大幅度。
+     * "相机 → PCS"矩阵元素的允许上限。
      *
-     * 正常白平衡增益下该色度精确落在 D50（实测偏差 0）；增益异常时会偏离
-     * 0.07 以上并伴随通道放大数十倍，所以 0.02 足以区分两者。
+     * 正常相机标定矩阵的元素远小于这个值；一旦某个元素超过它，说明矩阵是在
+     * 一个接近奇异的状态下求逆得到的，输出会出现严重色偏。
      */
-    private const val MAX_WHITE_POINT_CHROMATICITY_ERROR = 0.02f
+    private const val MAX_CAMERA_TO_PCS_ELEMENT = 6f
 
     private val PCS_TO_XYZ = floatArrayOf(0.9642957f, 1.0f, 0.8251046f)
     private val IDENTITY_3X3 = floatArrayOf(
@@ -533,7 +533,7 @@ internal object DngSdkColorSpec {
         }
 
         val forwardMatrix = matrices.forwardMatrix
-        if (forwardMatrix != null) {
+        val cameraToPcs = if (forwardMatrix != null) {
             val individualToReference = invertMatrix3x3(
                 multiplyMatrix3x3(diagonalMatrix(profile.analogBalance), matrices.cameraCalibration)
             ) ?: return null
@@ -546,27 +546,24 @@ internal object DngSdkColorSpec {
                 1f / referenceCameraWhite[1],
                 1f / referenceCameraWhite[2]
             ))
-            return multiplyMatrix3x3(multiplyMatrix3x3(forwardMatrix, inverseWhite), individualToReference)
+            multiplyMatrix3x3(multiplyMatrix3x3(forwardMatrix, inverseWhite), individualToReference)
+        } else {
+            invertMatrix3x3(scaledPcsToCamera) ?: return null
         }
 
-        val cameraToPcs = invertMatrix3x3(scaledPcsToCamera) ?: return null
-        if (isSelfConsistentWhitePoint(cameraToPcs, cameraWhite)) return cameraToPcs
+        if (isPlausibleCameraToPcs(cameraToPcs)) return cameraToPcs
 
-        // whiteXy 是由 HAL 上报的白平衡反推出来的。若该增益异常（部分 HAL 在
-        // AWB_MODE_OFF 下仍返回固定的自动增益，B 通道可能高达 5 以上），反推出的
-        // 白点会远离 D50，Bradford 适应把某个通道压到接近 0，下面的求逆就会把
-        // 该通道放大几十倍——中性灰直接变成一片色偏（一加 12 上实测蓝通道 0.033
-        // 被放大到 15，成片整张偏蓝）。
-        //
-        // 这里退回 D50 白点：宁可少做一次色温适应，也不产出偏色画面。
+        // 白点由白平衡增益反推而来。当增益异常时（部分 HAL 在手动白平衡下会导出
+        // 极端增益，把白点推到 2000K 附近），色适应矩阵会接近奇异，求逆后某个
+        // 通道被放大十几倍——一加 12 上实测蓝通道达到 15.04，成片整张偏蓝。
+        // 此时忽略该白点，退回不做白点适应的矩阵：宁可少一次色温适应，也不
+        // 产出偏色画面。
         PLog.w(
             "DngSdkColorSpec",
-            "cameraWhite=${cameraWhite.joinToString(",")} does not map to D50 (xy=${whiteXy.joinToString(",")}); " +
-                "falling back to the neutral D50 white point"
+            "rejecting ill-conditioned cameraToPcs (max=${cameraToPcs.maxOf { abs(it) }}) " +
+                "for cameraWhite=${cameraWhite.joinToString(",")}"
         )
-        return invertMatrix3x3(
-            normalizeToWhitePeak(multiplyMatrix3x3(matrices.colorMatrix, IDENTITY_3X3))
-        )
+        return invertMatrix3x3(normalizeToWhitePeak(matrices.colorMatrix))
     }
 
     /** 与 DNG 规范一致：按白点向量峰值缩放，使白点落在单位亮度。 */
@@ -579,23 +576,16 @@ internal object DngSdkColorSpec {
     }
 
     /**
-     * 校验 [cameraToPcs] 是否真的把 [cameraWhite] 这个中性点送到 D50。
+     * [cameraToPcs] 是否是一个可用的"相机 → PCS"变换矩阵。
      *
-     * 数学上不变量是 `cameraToPcs · cameraWhite` 的色度必须等于 D50。因为
-     * [whiteXy] 是由同一份 cameraWhite 反推出来的，这个等式在正常增益下成立；
-     * 当增益异常导致反推自相矛盾时，它会被放大成明显的色偏。
+     * 正常矩阵的元素都在个位数以内（实测自动白平衡最大 2.05，正常手动白平衡
+     * 同样量级）。只有在白点被推到极端位置、色适应矩阵接近奇异时，求逆才会
+     * 把某个通道放大到两位数（实测 15.04）。元素幅值可以可靠区分这两种情况。
      */
-    private fun isSelfConsistentWhitePoint(cameraToPcs: FloatArray, cameraWhite: FloatArray): Boolean {
-        if (cameraToPcs.size != 9 || cameraWhite.size < 3) return false
-        val mapped = multiplyMatrixVector(cameraToPcs, cameraWhite)
-        if (mapped.any { !it.isFinite() }) return false
-        val sum = mapped[0] + mapped[1] + mapped[2]
-        if (sum <= EPSILON) return false
-        val x = mapped[0] / sum
-        val y = mapped[1] / sum
-        if (!x.isFinite() || !y.isFinite()) return false
-        return abs(x - D50_X) <= MAX_WHITE_POINT_CHROMATICITY_ERROR &&
-            abs(y - D50_Y) <= MAX_WHITE_POINT_CHROMATICITY_ERROR
+    private fun isPlausibleCameraToPcs(cameraToPcs: FloatArray): Boolean {
+        if (cameraToPcs.size != 9) return false
+        if (cameraToPcs.any { !it.isFinite() }) return false
+        return cameraToPcs.all { abs(it) <= MAX_CAMERA_TO_PCS_ELEMENT }
     }
 
     private fun cameraWhiteForWhite(profile: PreparedProfile, whiteXy: FloatArray): FloatArray? {
